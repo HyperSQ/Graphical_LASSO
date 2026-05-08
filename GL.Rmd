@@ -1,0 +1,685 @@
+---
+title: "GL图实证检验"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+    fig_caption: true
+    keep_tex: false
+header-includes:
+  - \usepackage{ctex}
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+  - \usepackage{threeparttablex}
+  - \usepackage[normalem]{ulem}
+  - \usepackage{makecell}
+  - \usepackage{xcolor}
+fontsize: 12pt
+geometry: "left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm"
+mainfont: "SimSun"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(reticulate)
+use_python("C:/Users/钱/AppData/Local/Programs/Python/Python312/python.exe", required = TRUE)
+```
+
+# 概述
+
+Graphical-LASSO 在假设数据服从正态分布的情况下，利用套索选取不同对象之间的关联。对于样本协方差阵 $S$，用下述式子最小化从而求解估计精度矩阵 $\Theta$.
+
+
+$$\hat{\Theta} = \operatorname{argmin}_{\Theta \succeq 0} \left( \operatorname{Tr}(\mathbf{S}\Theta) - \log \det(\Theta) + \lambda \sum_{j \neq k} |\Theta_{jk}| \right)$$
+
+
+为与后面的TVGL作区别，这个单一$S$的估计方法称作SGL。最优化的算法包括ADMN、坐标下降、最小角回归。我利用了```Python```里面的```sklearn```与```GGLASSO```库求解。（在实际应用中发现GGLASSO的实现在$S$数值较小的时候稳定性较差，可能会在迭代过程中估计解变得不对称，从而出错）
+
+此外还有基于时间轴的序列GL方法，称为TVGL（或者是GGLASSO库里面称作的FGL），利用ADMN求解，参考自Network Inference via the Time-Varying Graphical Lasso(2017)，对时间序列上的相邻$\hat\Theta$作了$L1$惩罚：
+
+$$
+\min_{\Theta \in \mathbf{S}_{++}^p} \sum_{i=1}^T -l_i(\Theta_i) + \lambda \|\Theta_i\|_{\text{od},1} + \beta \sum_{i=2}^T \psi(\Theta_i - \Theta_{i-1})
+$$
+
+基于$\Theta$ 非零元素构建的图是GL图，同时有偏相关系数公式
+
+$$
+r_{ij}=-\frac{\rho_{ij}}{\sqrt{\rho_{ii}\rho_{jj}}}
+$$
+
+所以GL图或许还能反映资产间条件正负相关性。
+
+我利用了Tushare的日线股票数据接口。在当前阶段我选取了少量股票构成投资组合，观察GL图构建方法的表现。主要有两组：M1，用于观察较为微观的结构，包括海螺水泥、中国神华、中国建筑、宝钢股份、贵州茅台；M2包括海螺水泥、宝钢股份、紫金矿业、招商银行、中国平安、宁德时代、贵州茅台、长江电力、比亚迪。剔除当天有缺失的数据。如果某月全部缺失（或者天数过少）则剔除该月。
+
+M1组从2017年9月至今的月度数据是连续的，M2组从2018年6月至今的月度数据都是连续的。
+
+# 实验方案
+
+研究的为每天的对数收益率向量。
+
+首先选取月为频率，以每月结尾作为时间节点，按时间长度$W$计算$W$内的样本协方差阵$S$，构成时间序列样本协方差。然后，分别利用SGL与TVGL估计时间序列精度矩阵。然后计算出GL图序列（保留正负关系）。比较不同$W$（一个月、两个月……）的表现。
+
+针对时间轴的长短作一些比较。
+
+对SGL和TVGL的结果作比较。
+
+在选取最佳正则化系数时，参考GGLASSO库文档里的案例（https://gglasso.readthedocs.io/en/latest/auto_examples/plot_powerlaw_fgl.html#sphx-glr-auto-examples-plot-powerlaw-fgl-py），利用eBIC（考虑了模型稀疏性与似然）选择最佳系数。由于实际的样本协方差$S$的数值都非常小，所以我采用了对$S$作一个统一的缩放调整。利用损失函数可以观察到这实际上是调整了正则化系数$\alpha$的取值范围，同时保证优化过程中数值更稳定。选择缩放系数$\lambda$的原则是：通过调节$\lambda$使得最优系数落在待择区间内。
+
+# SGL
+
+## W的选择
+
+先对不同 $W$ 下SGL的估计表现做一个评估。我选择了$W=1,2,3,6,8$（单位：月）.正则化系数与缩放系数如下所示：
+
+| W   | α       | λ    | eBIC per month(M=104) |
+|-----|---------|------|--------------|
+| 1   | 0.07455 | 8000 | 160.35       |
+| 2   | 0.07455 | 8000 | 325.04       |
+| 3   | 0.07455 | 8000 | 487.90       |
+| 6   | 0.07455 | 8000 | 959.53       |
+| 8   | 0.07455 | 8000 | 1261.05      |
+
+
+
+
+```{r,echo=FALSE}
+#将Python的pickle数据转化为R中的data.frame，并画图
+py_run_string("
+import sys
+import types
+import pickle
+import numpy as np
+import datetime
+
+class NetworkData:
+    def __init__(self, time=None, jaccard_index=None, A=None, Theta=None, l1_penalty=None):
+        self.time = time
+        self.jaccard_index = jaccard_index
+        self.A = A
+        self.Theta = Theta
+        self.l1_penalty = l1_penalty
+
+gl_module = types.ModuleType('GL')
+gl_module.NetworkData = NetworkData
+sys.modules['GL'] = gl_module
+")
+
+read_network_pkl <- function(filepath) {
+  py_run_string("
+def load_network_data(file_path):
+    with open(file_path, 'rb') as f:
+        raw = pickle.load(f)
+    names = raw['name']
+    records = raw['data_array']
+    
+    result = []
+    for rec in records:
+        A_list = rec.A.tolist() if hasattr(rec.A, 'tolist') else rec.A
+        Theta_list = rec.Theta.tolist() if hasattr(rec.Theta, 'tolist') else rec.Theta
+        result.append({
+            'time': rec.time.isoformat(),
+            'jaccard_index': float(rec.jaccard_index),
+            'l1_penalty': float(rec.l1_penalty),
+            'A': A_list,
+            'Theta': Theta_list
+        })
+    return {'names': names, 'data': result}
+")
+
+  py_result <- py$load_network_data(filepath)
+  names_r <- py_result$names
+  n <- length(names_r)
+  
+  ts_df <- data.frame(
+    date = as.Date(sapply(py_result$data, function(x) x$time)),
+    jaccard_index = sapply(py_result$data, function(x) x$jaccard_index),
+    l1_penalty = sapply(py_result$data, function(x) x$l1_penalty)
+  )
+  
+  matrices <- lapply(py_result$data, function(rec) {
+    list(
+      A = matrix(unlist(rec$A), nrow = n, byrow = TRUE),
+      Theta = matrix(unlist(rec$Theta), nrow = n, byrow = TRUE)
+    )
+  })
+
+  list(
+    time_series = ts_df,
+    matrices = matrices,
+    names = names_r
+  )
+}
+
+d1 <- read_network_pkl("data/SGL_M1_W1_P8.pkl")
+d2 <- read_network_pkl("data/SGL_M1_W2_P8.pkl")
+d3 <- read_network_pkl("data/SGL_M1_W3_P8.pkl")
+d6 <- read_network_pkl("data/SGL_M1_W6_P8.pkl")
+d8 <- read_network_pkl("data/SGL_M1_W8_P8.pkl")
+
+result_combined <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+result_combined$source <- factor(result_combined$source,
+  levels = c("W1", "W2", "W3", "W6", "W8"),
+  labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+)
+
+ggplot(result_combined, aes(x = date, y = jaccard_index)) +
+  geom_line(color = "black", size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M1 Jaccard Index Series(8 years)",
+       x = "Time", y = "Jaccard Index") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+上表观察了M1近8年的图序列，呈现了利用不同时间窗口$W$得到的Jaccard Index。可见在$W$较小时，受噪声影响图序列会有较大的波动，Jaccard Index数值波动较大。在$W=8$时，图结构最为稳定，但是图较为稠密。
+
+
+```{r,echo=FALSE}
+ggplot(result_combined, aes(x = date, y = l1_penalty)) +
+  geom_line(size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M1 L1 Norm Series(8 years)",
+       x = "Time", y = "L1 norm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+上图呈现了相邻精度矩阵的 $L1$距离。
+
+## 时间轴长短影响
+
+接下来，我分别选取了约两年(2024.9-2026.4)、四年(2022.9-2026.4)的时间轴，观察差异。
+
+两年的最优系数：
+
+| W   | α       | λ    |
+|-----|---------|------|
+| 1   | 0.27790 | 16000 |
+| 2   | 0.27790 | 16000 |
+| 3   | 0.07455 | 16000 |
+| 6   | 0.07455 | 8000 |
+| 8   | 0.07455 | 8000 |
+
+四年的最优系数：
+
+| W   | α       | λ    |
+|-----|---------|------|
+| 1   | 0.07455 | 8000 |
+| 2   | 0.07455 | 8000 |
+| 3   | 0.07455 | 8000 |
+| 6   | 0.07455 | 8000 |
+| 8   | 0.07455 | 8000 |
+
+```{r,echo=FALSE}
+d1 <- read_network_pkl("data/SGL_M1_W1_P2.pkl")
+d2 <- read_network_pkl("data/SGL_M1_W2_P2.pkl")
+d3 <- read_network_pkl("data/SGL_M1_W3_P2.pkl")
+d6 <- read_network_pkl("data/SGL_M1_W6_P2.pkl")
+d8 <- read_network_pkl("data/SGL_M1_W8_P2.pkl")
+
+result_combined1 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+d1 <- read_network_pkl("data/SGL_M1_W1_P4.pkl")
+d2 <- read_network_pkl("data/SGL_M1_W2_P4.pkl")
+d3 <- read_network_pkl("data/SGL_M1_W3_P4.pkl")
+d6 <- read_network_pkl("data/SGL_M1_W6_P4.pkl")
+d8 <- read_network_pkl("data/SGL_M1_W8_P4.pkl")
+
+result_combined2 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+# 对于 result_combined，其 source 已经是因子标签 ("1 Months"...)，需要反向映射回原始代码
+source_levels <- c("W1", "W2", "W3", "W6", "W8")
+source_labels <- c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+
+result_combined <- result_combined %>%
+  mutate(source = as.character(factor(source, levels = source_labels, labels = source_levels)))
+
+# result_combined1 和 result_combined2 中的 source 本来就是 "W1","W2"... 字符，直接转换即可
+result_combined1 <- result_combined1 %>% mutate(source = as.character(source))
+result_combined2 <- result_combined2 %>% mutate(source = as.character(source))
+
+# 2. 添加时间长度标识
+result_combined <- result_combined %>% mutate(period = "8 Years")
+result_combined1 <- result_combined1 %>% mutate(period = "2 Years")
+result_combined2 <- result_combined2 %>% mutate(period = "4 Years")
+
+# 3. 合并所有数据
+total_data <- bind_rows(result_combined, result_combined1, result_combined2)
+
+# 4. 将 source 列转换为因子，使用统一标签（用于分面标题）
+total_data <- total_data %>%
+  mutate(source = factor(source, levels = source_levels, labels = source_labels))
+
+# 5. 过滤掉可能存在的 NA（确保不会出现多余分面）
+total_data <- total_data %>% filter(!is.na(source))
+
+# 6. 不需要过滤公共区间，保留所有原始时间范围
+
+# 7. 绘图（显示所有区域）
+ggplot(total_data, aes(x = date, y = jaccard_index, color = period, size = period)) +
+  geom_line(na.rm = TRUE) +
+  facet_wrap(~ source, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Jaccard Index in Different Periods",
+    x = "Time", y = "Jaccard Index", color = "Periods", size = "Periods"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    legend.position = "bottom"
+  ) +
+  scale_color_manual(values = c("8 Years" = "black", "4 Years" = "blue", "2 Years" = "red")) +
+  scale_size_manual(values = c("8 Years" = 0.2, "4 Years" = 0.5, "2 Years" = 0.8))
+```
+
+可以发现即便缩短时间轴长度也能得到较为吻合的曲线。
+
+## 样本外回测
+
+同样的投资组合我们用相同的模型回测2009-08到2016-06的数据。
+
+| W   | α       | λ    | eBIC per month(M=83)|
+|-----|---------|------|--------------|
+| 1   | 0.07455 | 8000 | 171.32       |
+| 2   | 0.07455 | 8000 | 346.14       |
+| 3   | 0.07455 | 8000 | 521.11       |
+| 6   | 0.07455 | 8000 | 1028.71      |
+| 8   | 0.07455 | 8000 | 1348.71      |
+
+```{r,echo=FALSE}
+d1 <- read_network_pkl("data/SGL_M1_W1_P8_R.pkl")
+d2 <- read_network_pkl("data/SGL_M1_W2_P8_R.pkl")
+d3 <- read_network_pkl("data/SGL_M1_W3_P8_R.pkl")
+d6 <- read_network_pkl("data/SGL_M1_W6_P8_R.pkl")
+d8 <- read_network_pkl("data/SGL_M1_W8_P8_R.pkl")
+
+result_combined3 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+result_combined3$source <- factor(result_combined3$source,
+  levels = c("W1", "W2", "W3", "W6", "W8"),
+  labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+)
+
+ggplot(result_combined3, aes(x = date, y = jaccard_index)) +
+  geom_line(color = "black", size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M1 Jaccard Index Series",
+       x = "Time", y = "Jaccard Index") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+```{r,echo=FALSE}
+ggplot(result_combined3, aes(x = date, y = l1_penalty)) +
+  geom_line(size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M1 L1 Norm Series",
+       x = "Time", y = "L1 norm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+理想情况下，时间窗口较长的时候，样本协方差矩阵会倾向于稳定，所以图的结构也会期望更加稳健。考虑在$W=8$时出现的部分波动，可以发现有一些波动在窗口更短时也能被反映。
+
+## 应用到M2组合
+
+M2的数据是从2018年6月2026年4月。除此之外的时间内存在股票长期缺失数据。
+
+| W   | α       | λ    | eBIC per month(M=95)|
+|-----|---------|------|--------------|
+| 1   | 1.03589 | 16000 | 461.30       |
+| 2   | 0.27790 | 16000 | 909.61       |
+| 3   | 0.27790 | 16000 | 1340.15      |
+| 6   | 0.27790 | 16000 | 2591.47      |
+| 8   | 0.27790 | 16000 | 3391.24      |
+
+```{r,echo=FALSE}
+d1 <- read_network_pkl("data/SGL_M2_W1_P8.pkl")
+d2 <- read_network_pkl("data/SGL_M2_W2_P8.pkl")
+d3 <- read_network_pkl("data/SGL_M2_W3_P8.pkl")
+d6 <- read_network_pkl("data/SGL_M2_W6_P8.pkl")
+d8 <- read_network_pkl("data/SGL_M2_W8_P8.pkl")
+
+result_combined4 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+result_combined4$source <- factor(result_combined4$source,
+  levels = c("W1", "W2", "W3", "W6", "W8"),
+  labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+)
+
+d1_m1 <- read_network_pkl("data/SGL_M1_W1_P8.pkl")
+d2_m1 <- read_network_pkl("data/SGL_M1_W2_P8.pkl")
+d3_m1 <- read_network_pkl("data/SGL_M1_W3_P8.pkl")
+d6_m1 <- read_network_pkl("data/SGL_M1_W6_P8.pkl")
+d8_m1 <- read_network_pkl("data/SGL_M1_W8_P8.pkl")
+
+result_combined_m1 <- bind_rows(
+  list(W1 = d1_m1$time_series,
+       W2 = d2_m1$time_series,
+       W3 = d3_m1$time_series,
+       W6 = d6_m1$time_series,
+       W8 = d8_m1$time_series),
+  .id = "source"
+) %>%
+  mutate(source = factor(source,
+                         levels = c("W1", "W2", "W3", "W6", "W8"),
+                         labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")),
+         group = "M1")
+
+# M2 数据（已经存在 result_combined4）
+result_combined_m2 <- result_combined4 %>%
+  mutate(group = "M2")
+
+# 合并
+combined_plot <- bind_rows(result_combined_m1, result_combined_m2)
+
+# 绘图
+ggplot(combined_plot, aes(x = date, y = jaccard_index, color = group)) +
+  geom_line(size = 0.5, alpha = 0.8) +
+  facet_wrap(~ source, ncol = 1, scales = "free_y") +
+  labs(title = "Jaccard Index Series: M1 vs M2",
+       x = "Time", y = "Jaccard Index", color = "Portfolio") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12),
+        legend.position = "bottom") +
+  scale_color_manual(values = c("M1" = "black", "M2" = "red"))
+```
+
+可以观察到随着组合的改变，曲线形状与M1有一定差异；由于组合数量变多，GL图倾向于变得更加稀疏，Jaccard Index波动也比M1更加剧烈。
+
+```{r,echo=FALSE}
+ggplot(result_combined4, aes(x = date, y = l1_penalty)) +
+  geom_line(size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M2 L1 Norm Series",
+       x = "Time", y = "L1 norm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+以上是M2组合的L1距离。
+
+# TVGL(FGL)
+
+## Jaccard Index
+
+接下来我们观测时变GL算法，用ADMN算法最优化。利用了```GGLASSO```库中的FGL模式。
+
+| W | α       | β       | λ    | eBIC per month(M=104)|
+|---|---------|---------|------|--------------|
+| 1 | 0.07455 | 0.02000 | 8000 | 161.68       |
+| 2 | 0.07455 | 0.02000 | 8000 | 326.30       |
+| 3 | 0.07455 | 0.02000 | 8000 | 488.98       |
+| 6 | 0.07455 | 0.02000 | 8000 | 960.39       |
+| 8 | 0.07455 | 0.02000 | 8000 | 1261.38      |
+
+```{r,echo=FALSE}
+d1 <- read_network_pkl("data/FGL_M1_W1_P8.pkl")
+d2 <- read_network_pkl("data/FGL_M1_W2_P8.pkl")
+d3 <- read_network_pkl("data/FGL_M1_W3_P8.pkl")
+d6 <- read_network_pkl("data/FGL_M1_W6_P8.pkl")
+d8 <- read_network_pkl("data/FGL_M1_W8_P8.pkl")
+
+result_combined5 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+result_combined5$source <- factor(result_combined5$source,
+  levels = c("W1", "W2", "W3", "W6", "W8"),
+  labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+)
+
+d1_m1 <- read_network_pkl("data/SGL_M1_W1_P8.pkl")
+d2_m1 <- read_network_pkl("data/SGL_M1_W2_P8.pkl")
+d3_m1 <- read_network_pkl("data/SGL_M1_W3_P8.pkl")
+d6_m1 <- read_network_pkl("data/SGL_M1_W6_P8.pkl")
+d8_m1 <- read_network_pkl("data/SGL_M1_W8_P8.pkl")
+
+result_combined_SGL <- bind_rows(
+  list(W1 = d1_m1$time_series,
+       W2 = d2_m1$time_series,
+       W3 = d3_m1$time_series,
+       W6 = d6_m1$time_series,
+       W8 = d8_m1$time_series),
+  .id = "source"
+) %>%
+  mutate(source = factor(source,
+                         levels = c("W1", "W2", "W3", "W6", "W8"),
+                         labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")),
+         group = "SGL")
+
+result_combined_FGL <- result_combined5 %>%
+  mutate(group = "FGL")
+
+# 合并
+combined_plot <- bind_rows(result_combined_SGL, result_combined_FGL)
+
+# 绘图
+ggplot(combined_plot, aes(x = date, y = jaccard_index, color = group)) +
+  geom_line(size = 0.3, alpha = 0.8) +
+  facet_wrap(~ source, ncol = 1, scales = "free_y") +
+  labs(title = "Jaccard Index Series: SGL vs TVGL",
+       x = "Time", y = "Jaccard Index", color = "Algorithm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12),
+        legend.position = "bottom") +
+  scale_color_manual(values = c("SGL" = "black", "FGL" = "blue"))
+```
+
+在M1组合中，无论如何调节$\lambda$（实际调节了参数范围），eBIC总是选取了最小的$\beta$，说明TVGL模型此时倾向于退化为SGL，得到的Jaccard Index曲线也没有太大差别。然后应用到M2中：
+
+| W | α       | β       | λ    | 平均每月eBIC |
+|---|---------|---------|------|--------------|
+| 1 | 1.03589 | 0.02000 | 8000 | 336.67       |
+| 2 | 0.27790 | 0.02000 | 8000 | 660.34       |
+| 3 | 0.27790 | 0.02000 | 8000 | 973.97       |
+| 6 | 0.07455 | 0.02000 | 8000 | 1888.34      |
+| 8 | 0.07455 | 0.02000 | 8000 | 2470.36      |
+
+```{r,echo=FALSE}
+d1 <- read_network_pkl("data/FGL_M2_W1_P8.pkl")
+d2 <- read_network_pkl("data/FGL_M2_W2_P8.pkl")
+d3 <- read_network_pkl("data/FGL_M2_W3_P8.pkl")
+d6 <- read_network_pkl("data/FGL_M2_W6_P8.pkl")
+d8 <- read_network_pkl("data/FGL_M2_W8_P8.pkl")
+
+result_combined5 <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series,
+       W8 = d8$time_series),
+  .id = "source"
+)
+
+result_combined5$source <- factor(result_combined5$source,
+  levels = c("W1", "W2", "W3", "W6", "W8"),
+  labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")
+)
+
+d1_m1 <- read_network_pkl("data/SGL_M2_W1_P8.pkl")
+d2_m1 <- read_network_pkl("data/SGL_M2_W2_P8.pkl")
+d3_m1 <- read_network_pkl("data/SGL_M2_W3_P8.pkl")
+d6_m1 <- read_network_pkl("data/SGL_M2_W6_P8.pkl")
+d8_m1 <- read_network_pkl("data/SGL_M2_W8_P8.pkl")
+
+result_combined_SGL <- bind_rows(
+  list(W1 = d1_m1$time_series,
+       W2 = d2_m1$time_series,
+       W3 = d3_m1$time_series,
+       W6 = d6_m1$time_series,
+       W8 = d8_m1$time_series),
+  .id = "source"
+) %>%
+  mutate(source = factor(source,
+                         levels = c("W1", "W2", "W3", "W6", "W8"),
+                         labels = c("1 Month", "2 Months", "3 Months", "6 Months", "8 Months")),
+         group = "SGL")
+
+result_combined_FGL <- result_combined5 %>%
+  mutate(group = "FGL")
+
+# 合并
+combined_plot <- bind_rows(result_combined_SGL, result_combined_FGL)
+
+# 绘图
+ggplot(combined_plot, aes(x = date, y = jaccard_index, color = group)) +
+  geom_line(size = 0.3, alpha = 0.8) +
+  facet_wrap(~ source, ncol = 1, scales = "free_y") +
+  labs(title = "Jaccard Index Series: SGL vs TVGL",
+       x = "Time", y = "Jaccard Index", color = "Algorithm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12),
+        legend.position = "bottom") +
+  scale_color_manual(values = c("SGL" = "black", "FGL" = "blue"))
+```
+
+
+同样在M2中TVGL倾向于退化为SGL。由于TVGL的求解器有一定的稳健性问题（比如数值误差累积、收敛到非半正定结果、收敛困难），所以我们倾向于直接用SGL的坐标下降法求解。
+
+TVGL理论上能得到更为平滑的精度矩阵变化，但是在对数收益率情形下，eBIC选择了退化为SGL。TVGL的计算量也高于SGL。
+
+# GL图部分分析
+
+Jaccard Index可以认为反映了关系网络的离散变化，相应地L1距离则是关系的连续变化。分析精度矩阵可能捕捉到什么事件时，可以从较长的窗口入手，观察较大的峰/谷，然后再比较短窗口的表现，最后回归到具体的邻接矩阵变化上，看看是否能捕捉到现实的某些事件“冲击”。
+
+根据这个思路，我用代码将时间序列可视化，回看M1组合的历史表现。
+
+首先发现$W=8$时，有一个Jaccard Index 大冲击发生在2018年6月，海螺水泥与中国建筑、中国建筑与宝钢股份、贵州茅台的关系发生了变化。然后回看同时期的更短窗口，同样的冲击（Jaccard Index或是L1距离）基本都能体现，而且所有的同时期网络都反映了海螺水泥与中国建筑（偏正相关变为无或者负）、贵州茅台关系的变化。然后我们回看2018年5到6月的事件，发现贵州茅台在5月份发生了领导层更迭与人事变动，副总经理违纪被披露引发价格波动；6月中旬中美贸易摩擦升级，美方对中国商品增加关税，但是涵盖的是航空航天、信息技术等高技术产品，虽然无直接影响，但是市场依然受到冲击，上证指数暴跌；5-6月水泥产量增速放缓，但是同比依然保持正增长，需求进入淡季，但是仍有部分地区水泥价格上调；中国建筑依然受“去杠杆”和PPP项目清理影响，基建新合同增速从3月到6月持续走低。这些事件可能可以解释贵州茅台的波动与供给需求端的关系变化。
+
+第二个可以分析的大冲击在2020年年底到2021年年初，GL图反映了贵州茅台，海螺水泥与宝钢股份关系的变化。在这个时期发生的事件包括美债收益率上行、央行发出“股市泡沫”预警，宝钢股份可能受海外供需缺口驱动股价持续上升，2021第一季度煤价上升、房地产政策落地执行可能致使海螺水泥在该时期呈现弱势。在GL图中，海螺水泥与宝钢股份从2020年末的偏正相关变为无/偏负相关。
+
+在M1的回测结果中也可以发现一些波动，比如2012年年末到2013年年初的时间范围中，中共十八大召开，“八项规定”政策影响了高端消费与白酒（尤其是茅台等名酒）和餐饮行业，这一时间范围内茅台的关系网发生了波动；市场可能对“城镇化”抱有极高期待，带动了房地产等周期股的反弹。
+
+在分析可能发生的事件时，可以结合Jaccard Index、L1 Norm和GL图实际变化展开分析，当然具有一定的局限性。
+
+# 资产数量更多的组合
+
+接下来，我再次尝试将股票用在更大规模的组合中，组合如下：
+
+```
+中国神华, 紫金矿业, 万华化学, 宝钢股份, 海螺水泥, 中国建筑,
+三一重工, 中航沈飞, 比亚迪, 美的集团, 顺丰控股, 长江电力, 
+伟明环保, 招商银行, 中国平安, 保利发展, 贵州茅台, 恒瑞医药, 
+牧原股份, 中国中免, 锦江酒店, 中际旭创, 分众传媒
+```
+
+共23只股票，可以获得自2018年6月以来的连续数据。扩大组合意味着我们必须选择更长的观测窗口，否则样本协方差矩阵会高度奇异导致SGL无法收敛。更多资产也意味着非NA月份更加稀缺，对数据质量有较大挑战。
+
+| W  | α       | λ    | eBIC per month(M=95)|
+|----|---------|------|--------------|
+| 4  | 0.27790 | 8000 | 3762.03      |
+| 8  | 0.27790 | 8000 | 6990.27      |
+| 12 | 0.27790 | 8000 | 9938.16      |
+| 24 | 0.27790 | 8000 | 17210.57     |
+
+```{r,echo=FALSE}
+
+d1 <- read_network_pkl("data/SGL_M3_W4.pkl")
+d2 <- read_network_pkl("data/SGL_M3_W8.pkl")
+d3 <- read_network_pkl("data/SGL_M3_W12.pkl")
+d6 <- read_network_pkl("data/SGL_M3_W24.pkl")
+
+result_combined <- bind_rows(
+  list(W1 = d1$time_series,
+       W2 = d2$time_series,
+       W3 = d3$time_series,
+       W6 = d6$time_series),
+  .id = "source"
+)
+
+result_combined$source <- factor(result_combined$source,
+  levels = c("W1", "W2", "W3", "W6"),
+  labels = c("4 Months", "8 Months", "12 Months", "24 Months")
+)
+
+ggplot(result_combined, aes(x = date, y = jaccard_index)) +
+  geom_line(color = "black", size = 0.5) +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M3 Jaccard Index Series",
+       x = "Time", y = "Jaccard Index") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+
+```{r,echo=FALSE}
+ggplot(result_combined, aes(x = date, y = l1_penalty)) +
+  geom_line(size = 0.5,color="black") +
+  facet_wrap(~ source, ncol = 1,scales = "free_y") +
+  labs(title = "M3 L1 Norm Series",
+       x = "Time", y = "L1 norm") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12))
+```
+
+M1、M2、M3不约而同地捕捉到了2020年中期、2024年年初、2025年中期的波动，可能分别对应疫情常态化，A股先抑后扬，两会与中美磋商。
+
+
+# 总结
+
+## GL图的特点
+
+GL利用L1惩罚保证了稀疏性，有利于筛选出关键的关系，在事件捕捉上具有潜力。同时，利用偏相关系数可以分离出关系的正负相关性，可能有助于选取投资组合（比如用于构造溢出动量策略）。
+
+## 局限性
+
+首先，GL对数据质量的要求较高，不仅对组合内数据缺失容忍度低，而且组合数量的增加也限制了观察期的长度。由于采用的数据为日线，样本协方差矩阵的估计可能受到噪声影响，GL图估计效果可能不好。一个改进的想法是，利用分钟级数据来获得协方差矩阵的一致估计量，期望能得到精度更高的数据，而且能完美解决协方差矩阵奇异（或者低秩）的问题。但是这也对数据有了更高要求，而且分钟级数据本身不好获得。
+
+其次，目前对GL图的分析只停留在定性，没有绝对的证据能说明某个事件对GL图的影响，或者GL图变化对事件的反映，所以无法衡量事件捕捉的准确度和精确度。从M1、M2、M3的比较上看，虽然在某些事件上有共动，但是GL图的变化指标（Jaccard、L1）也高度依赖于组合的选取。事件的捕捉是否有延迟也很难确定。
+
+然后，目前的模型选择方法（eBIC）选择的图都比较稠密，相对来说Jaccard Index的变化并没有期望中那么突出（要么观察期较短时普遍数值较低，或者长观察期普遍数值偏高）。此外我也尝试了用AIC作为超参的选择指标，但是区别并不大。为了方便训练，超参池的选择都较少，之后可以进一步加细超参的选择。
