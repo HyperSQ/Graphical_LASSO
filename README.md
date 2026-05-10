@@ -14,3 +14,5 @@ numpy(= 1.26.4) pandas matplotlib scikit-learn tushare h5py gglasso pytz
 ```get_data.py``` 从Tushare中获取日线数据
 
 ```example.py``` 调用计算样例
+
+```app.R``` Rshiny可视化，[Rshiny_GL](https://hypersq.shinyapps.io/Graph_LASSO/)
