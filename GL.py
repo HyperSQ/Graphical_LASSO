@@ -26,7 +26,7 @@ class NetworkData:
 
 def select_best_sgl(S, N, gamma=0.1):
     K, p, _ = S.shape
-    alphas = 2 * np.logspace(2, -2, 8)
+    alphas = 2 * np.logspace(1, -3, 20)
     bic_vals = np.zeros(len(alphas))
     Theta_list = []
     valid_idx = [k for k in range(K) if not np.any(np.isnan(S[k]))]
@@ -44,6 +44,7 @@ def select_best_sgl(S, N, gamma=0.1):
         Theta_list.append(Theta_tmp.copy())
 
     best_idx = np.nanargmin(bic_vals)
+    print(bic_vals)
     print(f"SGL 最佳 alpha: {alphas[best_idx]:.5f}")
     print(f"SGL 最佳 ebic: {bic_vals[best_idx]:.5f}")
     return alphas[best_idx], Theta_list[best_idx]

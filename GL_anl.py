@@ -1,6 +1,7 @@
+import os
 import pandas as pd
 import numpy as np
-import tushare as ts
+import pickle
 from datetime import datetime
 from GL import (
     select_best_fgl,
@@ -11,11 +12,41 @@ from GL import (
     NetworkData
 )
 
+def cov_to_corr(S):
+    """
+    将协方差矩阵序列 S (shape: K x p x p) 逐矩阵转换为相关系数矩阵。
+    若某矩阵对角线出现非正值，发出警告并将对应行/列置为 NaN。
+    """
+    S = np.asarray(S)
+    if S.ndim != 3:
+        raise ValueError(f"期望 S 为 3 维数组 (K, p, p)，实际得到 {S.ndim} 维")
+
+    K, p, _ = S.shape
+    corr_seq = np.empty_like(S)
+
+    for k in range(K):
+        cov = S[k]
+        diag = np.diag(cov)
+        bad = diag <= 0
+        if np.any(bad):
+            bad_indices = np.where(bad)[0]
+            print(f"警告: 第 {k} 个矩阵对角线含非正值，索引: {bad_indices.tolist()}")
+            diag_sqrt = np.sqrt(np.maximum(diag, 0))
+            corr = cov / np.outer(diag_sqrt, diag_sqrt)
+            corr[bad, :] = np.nan
+            corr[:, bad] = np.nan
+        else:
+            diag_sqrt = np.sqrt(diag)
+            corr = cov / np.outer(diag_sqrt, diag_sqrt)
+        corr_seq[k] = corr
+
+    return corr_seq
+
+
 def analyze_portfolio(txt_file,
                       start_date=None,
                       end_date=None,
                       h5_file='stock_daily_data.h5',
-                      token=None,
                       output_txt=None):
     output_buffer = []
 
@@ -23,23 +54,18 @@ def analyze_portfolio(txt_file,
         print(msg)
         output_buffer.append(msg)
 
-    if token is None:
-        token = 'your_tushare_token_here' 
-    pro = ts.pro_api(token)
-
     with open(txt_file, 'r') as f:
         codes = [line.strip() for line in f if line.strip()]
     if not codes:
         log("资产列表为空，请检查txt文件。")
         return
 
-    ts_code_str = ','.join(codes)
+    # 从 h5 文件读取资产简写
     try:
-        basic_df = pro.stock_basic(ts_code=ts_code_str, fields='ts_code,cnspell')
-        name_map = dict(zip(basic_df['ts_code'], basic_df['cnspell']))
-    except Exception as e:
-        log(f"获取股票简写失败: {e}")
-        name_map = {code: code for code in codes}  
+        name_map_df = pd.read_hdf(h5_file, key='meta/name_map')
+        name_map = dict(zip(name_map_df['ts_code'], name_map_df['cnspell']))
+    except (KeyError, Exception):
+        name_map = {code: code for code in codes}
 
     log("========== 资产简写（cnspell） ==========")
     for code in codes:
@@ -93,14 +119,14 @@ def analyze_portfolio(txt_file,
 
     months = raw_all_rets.index.to_period('M').unique().sort_values()
     total_months = len(months)
-    na_count = 0
-    available_codes = list(ret_series.keys())  
+    na_months = []
+    available_codes = list(ret_series.keys())
 
     log("月度协方差矩阵")
     for month in months:
         mask_raw = raw_all_rets.index.to_period('M') == month
         raw_month = raw_all_rets[mask_raw]
-        org_days = len(raw_month)     
+        org_days = len(raw_month)
 
         if not clean_all_rets.empty:
             mask_clean = clean_all_rets['year_month'] == month
@@ -114,25 +140,30 @@ def analyze_portfolio(txt_file,
         log(f"原数据天数 (并集): {org_days}")
         log(f"有效天数 (交集): {valid_days}")
 
-        log("各资产缺失天数:")
-        missing_counts = raw_month.isna().sum()    
-        for code in available_codes:
-            miss = missing_counts.get(code, 0)          
-            short_name = name_map.get(code, code)
-            log(f"  {short_name} ({code}): 缺失 {miss} 天")
-        # 若某个月 valid_days <= 1，协方差矩阵记为NA
-        if valid_days > 1 and not month_data.empty:
-            ret_data = month_data.drop(columns='year_month')
-            cov_matrix = ret_data.cov()
-            log("协方差矩阵:")
-            log(cov_matrix.round(8).to_string())
+        missing_counts = raw_month.isna().sum()
+        missing_assets = [
+            (code, missing_counts.get(code, 0))
+            for code in available_codes
+            if missing_counts.get(code, 0) > 0
+        ]
+        if missing_assets:
+            log("缺失资产:")
+            for code, miss in missing_assets:
+                short_name = name_map.get(code, code)
+                log(f"  {short_name} ({code}): 缺失 {miss} 天")
         else:
-            na_count += 1
-            log("协方差矩阵: NA (有效天数不足或全为缺失)")
+            log("缺失资产: 无")
+
+        if not (valid_days > 1 and not month_data.empty):
+            na_months.append(str(month))
 
     log("\n汇总信息")
     log(f"总月份数: {total_months}")
-    log(f"协方差矩阵为NA的月份数: {na_count}\n")
+    log(f"协方差矩阵有效的月份数: {total_months - len(na_months)}")
+    log(f"协方差矩阵为NA的月份数: {len(na_months)}")
+    if na_months:
+        log(f"NA的月份: {', '.join(na_months)}")
+    log("")
 
     if output_txt is not None:
         try:
@@ -146,25 +177,19 @@ def extract_cov_sequence(txt_file,
                          start_date=None,
                          end_date=None,
                          h5_file='stock_daily_data.h5',
-                         token=None,
-                         factor=1.0,
                          W=1):
-
-    if token is None:
-        token = 'your_tushare_token_here'  
-    pro = ts.pro_api(token)
 
     with open(txt_file, 'r') as f:
         codes = [line.strip() for line in f if line.strip()]
     if not codes:
         raise ValueError("资产列表为空，请检查txt文件。")
 
-    ts_code_str = ','.join(codes)
+    # 从 h5 文件读取资产简写
     try:
-        basic_df = pro.stock_basic(ts_code=ts_code_str, fields='ts_code,cnspell')
-        name_map = dict(zip(basic_df['ts_code'], basic_df['cnspell']))
-    except Exception:
-        name_map = {code: code for code in codes}   # 失败时用代码本身
+        name_map_df = pd.read_hdf(h5_file, key='meta/name_map')
+        name_map = dict(zip(name_map_df['ts_code'], name_map_df['cnspell']))
+    except (KeyError, Exception):
+        name_map = {code: code for code in codes}
 
     ret_series = {}
     for code in codes:
@@ -230,10 +255,59 @@ def extract_cov_sequence(txt_file,
 
         if len(window_data) > 1:
             cov = window_data.cov()
-            S_list.append(cov.values * factor)
+            S_list.append(cov.values)
         else:
             S_list.append(nan_mat.copy())
 
     S_array = np.stack(S_list, axis=0)   # shape: (K, p, p)
 
     return name_list, S_array, date_list
+
+
+def run_network_analysis(portfolio, h5_file, W,
+                         type='SGL', gamma=0.1,
+                         start_date=None, end_date=None,
+                         p_name='portfolio'):
+    """
+    从 h5 文件读取数据，提取协方差序列并转为相关系数矩阵，
+    运行 FGL/SGL 网络估计，结果保存为 {p_name}_W={W}.pkl。
+    """
+    N = 20 * W
+
+    name, S, date = extract_cov_sequence(
+        txt_file=portfolio, h5_file=h5_file,
+        start_date=start_date, end_date=end_date, W=W
+    )
+
+    Corr = cov_to_corr(S)
+
+    if type == 'FGL':
+        _, _, Theta = select_best_fgl(Corr, N, gamma=gamma)
+    else:
+        if type != 'SGL':
+            print(f"未知 type='{type}'，默认使用 SGL")
+        _, Theta = select_best_sgl(Corr, N, gamma=gamma)
+
+    l1_pen = compute_l1_distance(Theta)
+    Adj_seq = threshold_to_adjacency(Theta, 1e-2)
+    jaccard_seq = jaccard_index_sequence(Adj_seq)
+
+    date_list = [datetime.strptime(str(m), '%Y-%m').date() for m in date]
+
+    data_array = []
+    for idx, t in enumerate(date_list):
+        data_array.append(NetworkData(
+            time=t,
+            jaccard_index=jaccard_seq[idx],
+            A=Adj_seq[idx].copy(),
+            Theta=Theta[idx].copy(),
+            l1_penalty=l1_pen[idx]
+        ))
+
+    filename = f"{p_name}_W={W}.pkl"
+    os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
+    with open(filename, 'wb') as f:
+        pickle.dump({'name': name, 'data_array': data_array}, f)
+
+    print(f"已保存至: {filename}")
+    return name, data_array
