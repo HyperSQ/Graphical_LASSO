@@ -12,7 +12,7 @@ import pickle
 import os
 import glob
 import tkinter as tk
-from tkinter import Listbox, END
+from tkinter import Listbox, END, filedialog
 from GL import NetworkData
 
 import sys, os
@@ -79,11 +79,12 @@ def get_colored_adjacency(A, Theta):
     return rgb
 
 def run_ui():
-    pkl_files = glob.glob('data/*.pkl')
-    cbar = None  
+    current_folder = os.path.join(base_dir, 'data')
+    pkl_files = glob.glob(os.path.join(current_folder, '*.pkl'))
+    cbar = None
     if not pkl_files:
         print("当前目录没有 .pkl 文件")
-        default_file = 'data/financial_network_data.pkl'
+        default_file = os.path.join(current_folder, 'financial_network_data.pkl')
         generate_simulated_data(filename=default_file, N=15, months=72)
         pkl_files = [default_file]
 
@@ -128,6 +129,7 @@ def run_ui():
     ax_line = fig.add_subplot(gs[0, :])
     ax_A = fig.add_subplot(gs[1, 0])
     ax_Theta = fig.add_subplot(gs[1, 1])
+    ax_Theta_pos = ax_Theta.get_position()
 
     line_jaccard = ax_line.plot(times, jaccards, '-', color='#2b8cbe', linewidth=1.5, label='Jaccard Index')
     vline = ax_line.axvline(x=times[0], color='#de2d26', linestyle='--', linewidth=2)
@@ -181,7 +183,10 @@ def run_ui():
     ax_button = plt.axes([0.15, 0.11, 0.12, 0.04])
     btn_select = Button(ax_button, '选择文件', color='lightgoldenrodyellow', hovercolor='0.975')
 
-    file_label = fig.text(0.30, 0.12, current_file, fontsize=9, color='#238b45')
+    ax_folder_btn = plt.axes([0.28, 0.11, 0.12, 0.04])
+    btn_folder = Button(ax_folder_btn, '选择文件夹', color='lightgoldenrodyellow', hovercolor='0.975')
+
+    file_label = fig.text(0.42, 0.12, current_file, fontsize=9, color='#238b45')
 
     def update(val):
         idx = int(slider.val)
@@ -258,6 +263,7 @@ def run_ui():
                 pass
             cbar = None
 
+        ax_Theta.set_position(ax_Theta_pos)
         cbar = fig.colorbar(img_T, ax=ax_Theta, fraction=0.046, pad=0.04)
 
         # 重新设置两个矩阵图的坐标轴、网格和范围
@@ -283,8 +289,22 @@ def run_ui():
 
         fig.canvas.draw_idle()
 
+    def select_folder(event):
+        nonlocal current_folder, current_file
+        folder = filedialog.askdirectory(initialdir=current_folder, title='选择数据文件夹')
+        if not folder:
+            return
+        current_folder = folder
+        new_files = glob.glob(os.path.join(current_folder, '*.pkl'))
+        if not new_files:
+            print(f"文件夹 '{current_folder}' 中没有 .pkl 文件")
+            return
+        chosen = new_files[0]
+        load_new_file(chosen)
+
     def open_file_selector(event):
-        files = glob.glob('data/*.pkl')
+        nonlocal current_folder
+        files = glob.glob(os.path.join(current_folder, '*.pkl'))
         if not files:
             print("当前目录没有 .pkl 文件！")
             return
@@ -298,7 +318,7 @@ def run_ui():
 
         listbox = Listbox(top, selectmode=tk.SINGLE)
         for f in files:
-            listbox.insert(END, f)
+            listbox.insert(END, os.path.basename(f))
         listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         if current_file in files:
@@ -323,6 +343,7 @@ def run_ui():
         top.mainloop()
 
     btn_select.on_clicked(open_file_selector)
+    btn_folder.on_clicked(select_folder)
 
     slider.on_changed(update)
     textbox.on_submit(submit_text)
