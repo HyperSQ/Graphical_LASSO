@@ -24,10 +24,14 @@ class NetworkData:
     l1_penalty: float
 
 
-def select_best_sgl(S, N, gamma=0.1):
+def select_best_sgl(S, N, gamma=0.1, threshold=1e-2, verbose=True):
     K, p, _ = S.shape
     alphas = 2 * np.logspace(1, -3, 20)
-    bic_vals = np.zeros(len(alphas))
+    n = len(alphas)
+    aic_vals = np.zeros(n)
+    bic_vals = np.zeros(n)
+    l1_avgs = np.zeros(n)
+    edge_avgs = np.zeros(n)
     Theta_list = []
     valid_idx = [k for k in range(K) if not np.any(np.isnan(S[k]))]
     if len(valid_idx) < K:
@@ -38,29 +42,46 @@ def select_best_sgl(S, N, gamma=0.1):
     for i, alpha in enumerate(alphas):
         Theta_tmp = np.zeros((K, p, p))
         for k in range(K):
-            _, prec = graphical_lasso(S[k], alpha=alpha,max_iter=10000,tol=5e-3)
+            _, prec = graphical_lasso(S[k], alpha=alpha, max_iter=10000, tol=5e-3)
             Theta_tmp[k] = prec
+        aic_vals[i] = aic(S, Theta_tmp, N)
         bic_vals[i] = ebic(S, Theta_tmp, N, gamma=gamma)
+        l1_avgs[i] = np.mean([np.sum(np.abs(Theta_tmp[k])) for k in range(K)])
+        adj_tmp = threshold_to_adjacency(Theta_tmp, threshold)
+        edge_avgs[i] = np.mean([np.sum(adj_tmp[k]) for k in range(K)])
         Theta_list.append(Theta_tmp.copy())
 
     best_idx = np.nanargmin(bic_vals)
-    print(bic_vals)
-    print(f"SGL 最佳 alpha: {alphas[best_idx]:.5f}")
-    print(f"SGL 最佳 ebic: {bic_vals[best_idx]:.5f}")
-    return alphas[best_idx], Theta_list[best_idx]
+
+    if verbose:
+        print(f"\nSGL 超参搜索 (gamma={gamma})\n")
+        print(f"{'alpha':>10s}  {'AIC':>10s}  {'eBIC':>10s}  {'avg(L1)':>10s}  {'avg(Edges)':>11s}")
+        print("-" * 58)
+        for i in range(n):
+            mark = " ***" if i == best_idx else ""
+            print(f"{alphas[i]:10.5f}  {aic_vals[i]:10.2f}  {bic_vals[i]:10.2f}  "
+                  f"{l1_avgs[i]:10.3f}  {edge_avgs[i]:10.1f}{mark}")
+        print("-" * 58)
+    best_Theta = Theta_list[best_idx]
+    best_Adj = threshold_to_adjacency(best_Theta, threshold)
+    print(f"SGL 最佳 alpha: {alphas[best_idx]:.5f}  "
+          f"AIC: {aic_vals[best_idx]:.2f}  eBIC: {bic_vals[best_idx]:.2f}")
+    return alphas[best_idx], best_Theta, best_Adj
 
 
 
-def select_best_fgl(S, N, gamma=0.1, use_aic=False):
+def select_best_fgl(S, N, gamma=0.1, use_aic=False, threshold=1e-2, verbose=True):
     K, p, _ = S.shape
-    l1_candidates = 2 * np.logspace(2, -2, 8)  
-    l2_candidates = 2 * np.logspace(2, -2, 8)
+    l1_candidates = 2 * np.logspace(1, -3, 10)
+    l2_candidates = 2 * np.logspace(1, -3, 10)
 
-    L2, L1 = np.meshgrid(l2_candidates, l1_candidates)  
+    L2, L1 = np.meshgrid(l2_candidates, l1_candidates)
     n1, n2 = L1.shape
 
     AIC_mat = np.zeros((n1, n2))
     BIC_mat = np.zeros((n1, n2))
+    L1_avg_mat = np.zeros((n1, n2))
+    Edge_avg_mat = np.zeros((n1, n2))
 
     Omega_0 = get_K_identity(K, p)
     Theta_0 = get_K_identity(K, p)
@@ -87,9 +108,16 @@ def select_best_fgl(S, N, gamma=0.1, use_aic=False):
                 #防止warm start不对称
                 AIC_mat[g1, g2] = aic(S, Theta_sol, N)
                 BIC_mat[g1, g2] = ebic(S, Theta_sol, N, gamma=gamma)
+                L1_avg_mat[g1, g2] = np.mean([np.sum(np.abs(Theta_sol[k]))
+                                             for k in range(K)])
+                adj_tmp = threshold_to_adjacency(Theta_sol, threshold)
+                Edge_avg_mat[g1, g2] = np.mean([np.sum(adj_tmp[k])
+                                                for k in range(K)])
             except np.linalg.LinAlgError:
                 AIC_mat[g1, g2] = np.inf
                 BIC_mat[g1, g2] = np.inf
+                L1_avg_mat[g1, g2] = np.nan
+                Edge_avg_mat[g1, g2] = np.nan
                 continue
 
     if use_aic:
@@ -99,8 +127,32 @@ def select_best_fgl(S, N, gamma=0.1, use_aic=False):
 
     lam1_opt = L1[ix]
     lam2_opt = L2[ix]
-    print(f"FGL 最佳 (alpha, beta): ({lam1_opt:.5f}, {lam2_opt:.5f})")
-    print(f"FGL 最佳 eBIC: {BIC_mat[ix]:.5f}")
+
+    if verbose:
+        crit_mat = AIC_mat if use_aic else BIC_mat
+        crit_name = "AIC" if use_aic else "eBIC"
+
+        def print_2d(title, mat, fmt=".2f"):
+            print(f"\n{title}:")
+            header = f"{'alpha\\beta':>10s}"
+            for b in l2_candidates:
+                header += f"  {b:8.4f}"
+            print(header)
+            for i, a in enumerate(l1_candidates):
+                row = f"{a:10.4f}"
+                for j in range(len(l2_candidates)):
+                    if np.isinf(AIC_mat[i, j]) or np.isnan(mat[i, j]):
+                        row += f"  {'---':>8s}"
+                    else:
+                        row += f"  {mat[i, j]:8{fmt}}"
+                print(row)
+
+        print(f"\nFGL 超参搜索 (gamma={gamma})")
+        print_2d(crit_name, crit_mat, ".2f")
+        print_2d("avg(Edges)", Edge_avg_mat, ".1f")
+
+    print(f"FGL 最佳 (alpha, beta): ({lam1_opt:.5f}, {lam2_opt:.5f})  "
+          f"AIC: {AIC_mat[ix]:.2f}  eBIC: {BIC_mat[ix]:.2f}")
 
     sol_opt, _ = ADMM_MGL(
         S, lam1_opt, lam2_opt, 'FGL',
@@ -109,7 +161,9 @@ def select_best_fgl(S, N, gamma=0.1, use_aic=False):
         X_0=np.zeros((K, p, p)),
         tol=1e-5, rtol=1e-5, verbose=False
     )
-    return lam1_opt, lam2_opt, sol_opt['Theta']
+    best_Theta = sol_opt['Theta']
+    best_Adj = threshold_to_adjacency(best_Theta, threshold)
+    return lam1_opt, lam2_opt, best_Theta, best_Adj
 
 
 def compute_l1_distance(Theta_seq):
@@ -162,14 +216,15 @@ def simulate_stock_experiment(N_assets=8, T=20, method='SGL',
     S, _ = sample_covariance_matrix(Sigma, N_samples)
 
     if method == 'SGL':
-        _, Theta_est = select_best_sgl(S, N_samples, gamma=0.1)
+        _, Theta_est, adj_seq = select_best_sgl(S, N_samples, gamma=0.1,
+                                                 threshold=threshold)
     elif method == 'FGL':
-        _, _, Theta_est = select_best_fgl(S, N_samples, gamma=0.1)
+        _, _, Theta_est, adj_seq = select_best_fgl(S, N_samples, gamma=0.1,
+                                                    threshold=threshold)
     else:
         raise ValueError("method 必须为 'SGL' 或 'FGL'")
 
-    adj_seq = threshold_to_adjacency(Theta_est, threshold)
-    l1_dist = compute_l1_distance(Theta_est)        
+    l1_dist = compute_l1_distance(Theta_est)
     jaccard_seq = jaccard_index_sequence(adj_seq)
 
     # 随机生成资产简称
