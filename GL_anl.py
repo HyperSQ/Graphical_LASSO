@@ -6,7 +6,6 @@ from datetime import datetime
 from GL import (
     select_best_fgl,
     select_best_sgl,
-    threshold_to_adjacency,
     jaccard_index_sequence,
     compute_l1_distance,
     NetworkData
@@ -267,7 +266,8 @@ def extract_cov_sequence(txt_file,
 def run_network_analysis(portfolio, h5_file, W,
                          type='SGL', gamma=0.1,
                          start_date=None, end_date=None,
-                         p_name='portfolio'):
+                         p_name='portfolio',
+                         output_dir='.'):
     """
     从 h5 文件读取数据，提取协方差序列并转为相关系数矩阵，
     运行 FGL/SGL 网络估计，结果保存为 {p_name}_W={W}.pkl。
@@ -282,14 +282,13 @@ def run_network_analysis(portfolio, h5_file, W,
     Corr = cov_to_corr(S)
 
     if type == 'FGL':
-        _, _, Theta = select_best_fgl(Corr, N, gamma=gamma)
+        _, _, Theta, Adj_seq = select_best_fgl(Corr, N, gamma=gamma)
     else:
         if type != 'SGL':
             print(f"未知 type='{type}'，默认使用 SGL")
-        _, Theta = select_best_sgl(Corr, N, gamma=gamma)
+        _, Theta, Adj_seq = select_best_sgl(Corr, N, gamma=gamma)
 
     l1_pen = compute_l1_distance(Theta)
-    Adj_seq = threshold_to_adjacency(Theta, 1e-2)
     jaccard_seq = jaccard_index_sequence(Adj_seq)
 
     date_list = [datetime.strptime(str(m), '%Y-%m').date() for m in date]
@@ -304,8 +303,8 @@ def run_network_analysis(portfolio, h5_file, W,
             l1_penalty=l1_pen[idx]
         ))
 
-    filename = f"{p_name}_W={W}.pkl"
-    os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
+    filename = os.path.join(output_dir, f"{type}_{p_name}_W={W}.pkl")
+    os.makedirs(output_dir, exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump({'name': name, 'data_array': data_array}, f)
 
